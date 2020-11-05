@@ -1,54 +1,81 @@
 const { BEARER_TOKEN } = require("./twitter-api-keys");
-const { ENDPOINT_TO_FETCH_CONVERSATION_ID, 
-    TWEET_FIELDS,
-    USER_FIELDS,
-    MEDIA_FIELDS,
-    POLL_FIELDS,
-    PLACE_FIELDS,
-    EXPANSIONS} = require("./twitter-endpoints");
-const { getTweetObject, 
-        checkIfRequestSuccessful } = require("./tweet-utils");
+
+const { UserError } = require("../../helpers/error");
+
+const { getTweetObject, checkIfRequestSuccessful, getUrl } = require("./tweet-utils");
 const { processTweetLookup } = require("./tweet-lookup-response");
-const fetch = require("node-fetch");  
-
-async function doTweetLookup(tweet_id) {
-    try {
-        // console.log(getUrl(tweet_id));
-        let response = await fetch(getUrl(tweet_id), getRequestOptions());
-        await processResponse(response);
-    } catch(err) {
-        console.log(err);
-    }
-}
-
-async function processResponse(response) {
-    if(checkIfRequestSuccessful(response)) {
-        let responseJSON = await response.json();
-        let tweet = getTweetObject(responseJSON);
-        if(isTweetNotOlderThanSevenDays(tweet)) {
-            if(!isProvidedTweetFirstTweetOfTheThread(tweet))
-                await doTweetLookup(tweet.conversation_id);
-            else
-                await processTweetLookup(responseJSON);
-        }
-    }
-}
-
-const getUrl = (tweet_id) => `${ENDPOINT_TO_FETCH_CONVERSATION_ID}${tweet_id}${TWEET_FIELDS}${EXPANSIONS}${USER_FIELDS}${MEDIA_FIELDS}${PLACE_FIELDS}${POLL_FIELDS}`;
+const fetch = require("node-fetch");
+const { writeFile } = require("fs").promises;
 
 const getRequestOptions = () => {
-    return {
-        method : 'GET',
-        headers: { "Authorization" : BEARER_TOKEN },
-        redirect: 'follow'
-    };
+  return {
+    method: "GET",
+    headers: { Authorization: BEARER_TOKEN },
+    redirect: "follow",
+  };
 };
 
 const isProvidedTweetFirstTweetOfTheThread = (tweet) => tweet.id === tweet.conversation_id;
 
 const isTweetNotOlderThanSevenDays = (tweet) => {
-    let differenceInDays = (new Date().getTime() - new Date(tweet.created_at).getTime())/(1000 * 3600 * 24);
-    return  differenceInDays >= 7 ? false : true; 
+  const currentTime = +new Date();
+  const tweetCreatedAt = +new Date(tweet.created_at);
+
+  const differenceInDays = (currentTime - tweetCreatedAt) / (1000 * 3600 * 24);
+  return differenceInDays <= 7;
 };
 
-module.exports = { doTweetLookup }
+const isTweetDeleted = (responseJSON) => {
+  if (responseJSON.errors === undefined) return false;
+
+  return true;
+};
+
+/**
+ *
+ * @param {string} tweet_id
+ */
+async function doTweetLookup(tweet_id) {
+  try {
+    // console.log(getUrl(tweet_id));
+    /** @type {Response} */
+    const response = await fetch(getUrl(tweet_id), getRequestOptions());
+    // console.log(getUrl(tweet_id))
+    return await processResponse(response);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+/**
+ * Process the data received from Twitter API
+ * @param {Response} response
+ */
+async function processResponse(response) {
+  if (!checkIfRequestSuccessful(response)) {
+    console.log(await response.json());
+
+    throw new UserError("request-failed", "Request failed. Check your network and try again");
+  }
+
+  let responseJSON = await response.json();
+
+  if (isTweetDeleted(responseJSON)) {
+    throw new UserError("tweet-deleted", "Cannot fetch details of this tweet.");
+  }
+
+  let tweet = getTweetObject(responseJSON);
+
+  if (!isTweetNotOlderThanSevenDays(tweet)) {
+    throw new UserError("tweet-older-than-7-days", "The tweet must not be older than 7 days.");
+  }
+
+  if (!isProvidedTweetFirstTweetOfTheThread(tweet)) {
+    // This ain't the first tweet of the thread. Find out the first of this thread
+    await doTweetLookup(tweet.conversation_id);
+  } else {
+    await processTweetLookup(responseJSON);
+  }
+}
+
+module.exports = { doTweetLookup };
